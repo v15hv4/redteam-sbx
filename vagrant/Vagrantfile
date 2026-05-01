@@ -1,0 +1,58 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  # Kali Linux Rolling
+  config.vm.box = "kalilinux/rolling"
+  config.vm.hostname = "kali"
+
+  # Network configuration
+  # Private network for isolated testing
+  config.vm.network "private_network", type: "dhcp"
+  
+  # Forward common ports (optional - uncomment as needed)
+  # config.vm.network "forwarded_port", guest: 80, host: 8080
+  # config.vm.network "forwarded_port", guest: 443, host: 8443
+
+  # Libvirt provider settings (preferred on this system)
+  config.vm.provider "libvirt" do |libvirt|
+    libvirt.memory = 8192
+    libvirt.cpus = 4
+    libvirt.graphics_type = "spice"
+    libvirt.video_type = "qxl"
+    libvirt.video_vram = 65536
+  end
+
+  # Provision: Update and install additional tools
+  config.vm.provision "shell", inline: <<-SHELL
+    apt-get update
+    apt-get upgrade -y
+    
+    # Ensure common pentest tools are installed
+    apt-get install -y \
+      nmap \
+      metasploit-framework \
+      burpsuite \
+      sqlmap \
+      gobuster \
+      dirb \
+      nikto \
+      hydra \
+      john \
+      hashcat \
+      wireshark \
+      netcat-traditional \
+      proxychains4 \
+      seclists \
+      wordlists \
+      nodejs \
+      npm
+    
+    echo "Kali Linux Pentest environment ready!"
+  SHELL
+
+  # Shared folder for easy file transfer
+  config.vm.synced_folder ".", "/vagrant", type: "nfs",
+    nfs_version: 4,
+    nfs_udp: false
+end
