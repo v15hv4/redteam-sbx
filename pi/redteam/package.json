@@ -1,0 +1,13 @@
+{
+  "name": "pi-redteam",
+  "version": "1.0.0",
+  "description": "Autonomous red team penetration testing extension for Pi",
+  "scripts": {
+    "build": "make build",
+    "install-ext": "make install"
+  },
+  "pi": {
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"]
+  }
+}
