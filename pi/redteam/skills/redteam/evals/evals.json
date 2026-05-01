@@ -1,0 +1,86 @@
+{
+  "name": "redteam",
+  "description": "Comprehensive external security assessment skill",
+  "evals": [
+    {
+      "name": "subdomain_enumeration",
+      "description": "Test subdomain discovery capabilities",
+      "input": "/subdomain example.com",
+      "expectedBehaviors": [
+        "Runs subfinder or alternative",
+        "Queries certificate transparency (crt.sh)",
+        "Performs DNS brute force on common subdomains",
+        "Combines and deduplicates results",
+        "Presents discovered subdomains for analysis"
+      ]
+    },
+    {
+      "name": "third_party_services",
+      "description": "Test third-party service detection",
+      "input": "/services example.com",
+      "expectedBehaviors": [
+        "Queries DNS TXT records",
+        "Analyzes response headers",
+        "Extracts services from frontend JS",
+        "Identifies Auth0, Stripe, PostHog, etc.",
+        "Reports service exposure levels"
+      ]
+    },
+    {
+      "name": "cors_testing",
+      "description": "Test CORS misconfiguration detection",
+      "input": "/cors https://api.example.com",
+      "expectedBehaviors": [
+        "Tests multiple malicious origins",
+        "Checks for origin reflection",
+        "Detects credentials header",
+        "Identifies CRITICAL: origin + credentials",
+        "Tests preflight requests"
+      ]
+    },
+    {
+      "name": "endpoint_discovery",
+      "description": "Test API endpoint discovery",
+      "input": "/endpoints https://api.example.com",
+      "expectedBehaviors": [
+        "Tests common API paths",
+        "Tests multiple HTTP methods per endpoint",
+        "Identifies accessible endpoints (200)",
+        "Notes endpoints with sensitive data",
+        "Presents results in table format"
+      ]
+    },
+    {
+      "name": "full_assessment",
+      "description": "Test full Terrain-style assessment",
+      "input": "/redteam-full example.com",
+      "expectedBehaviors": [
+        "Runs DNS enumeration in parallel",
+        "Discovers subdomains from multiple sources",
+        "Fingerprints infrastructure (cloud, CDN)",
+        "Detects third-party services",
+        "Discovers API endpoints",
+        "Tests CORS configuration",
+        "Analyzes security headers",
+        "Generates comprehensive report",
+        "Uses record_finding for vulnerabilities"
+      ]
+    },
+    {
+      "name": "tool_check",
+      "description": "Test tool availability checking",
+      "input": "/tools",
+      "expectedBehaviors": [
+        "Lists all required tools",
+        "Shows installed vs missing",
+        "Provides installation commands"
+      ]
+    }
+  ],
+  "qualityCriteria": {
+    "coverage": "Must test all phases from Terrain methodology",
+    "parallelism": "DNS and infrastructure scans should run in parallel",
+    "output_format": "Results should match Terrain report structure",
+    "findings": "All vulnerabilities must be documented with record_finding"
+  }
+}

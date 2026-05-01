@@ -471,11 +471,11 @@ Analyze the brute force results:
   });
 
   // ============================================================
-  // PARALLEL REDTEAM - DIRECT EXECUTION
+  // QUICK REDTEAM - DIRECT EXECUTION
   // ============================================================
 
-  pi.registerCommand("redteam", {
-    description: "🚀 Full Red Team - Parallel execution of all scans",
+  pi.registerCommand("redteam-quick", {
+    description: "🚀 Quick Red Team - Parallel nmap, nikto, nuclei, gobuster scans",
     handler: async (args, ctx) => {
       if (!args) {
         ctx.ui.notify("Usage: /redteam <target>", "error");
@@ -850,6 +850,713 @@ Total findings: ${state.findings.length}
         ],
         details: { state },
       };
+    },
+  });
+
+  // ============================================================
+  // TERRAIN-STYLE COMPREHENSIVE ASSESSMENT
+  // ============================================================
+
+  pi.registerCommand("redteam", {
+    description: "🎯 Full Terrain-style security assessment - subdomains, infrastructure, services, endpoints, CORS",
+    handler: async (args, ctx) => {
+      if (!args) {
+        ctx.ui.notify("Usage: /redteam <domain>", "error");
+        return;
+      }
+
+      const target = args.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+      const workDir = `/tmp/redteam-${target}`;
+      
+      state.target = target;
+      state.startTime = Date.now();
+      state.toolsUsed = [];
+      state.scanResults = {};
+      pi.appendEntry("redteam-state", state);
+
+      ctx.ui.notify(`🎯 Starting Terrain-style assessment on ${target}...`, "info");
+      ctx.ui.notify(`Output directory: ${workDir}`, "info");
+
+      // Create working directory
+      await execCommand(`mkdir -p ${workDir}`);
+
+      const allResults: Record<string, string> = {};
+
+      // ============================================================
+      // PHASE 1: DNS & SUBDOMAIN ENUMERATION (Parallel)
+      // ============================================================
+      ctx.ui.notify("📡 Phase 1: DNS & Subdomain Enumeration...", "info");
+      
+      const dnsPromises = [
+        // DNS records
+        (async () => {
+          const dns = await execCommand(`
+            echo "=== A Records ==="
+            dig +short ${target} A
+            echo "=== MX Records ==="
+            dig +short ${target} MX
+            echo "=== NS Records ==="
+            dig +short ${target} NS
+            echo "=== TXT Records ==="
+            dig +short ${target} TXT
+            echo "=== CNAME Records ==="
+            dig +short ${target} CNAME
+          `, 60);
+          allResults["dns"] = dns.output;
+          await execCommand(`echo '${dns.output.replace(/'/g, "'\\''")}' > ${workDir}/dns-records.txt`);
+          ctx.ui.notify("✅ DNS records collected", "info");
+        })(),
+
+        // Subdomain enumeration (subfinder)
+        (async () => {
+          const subfinder = await execCommand(
+            `subfinder -d ${target} -silent 2>/dev/null | head -100 || echo "subfinder not available"`,
+            180
+          );
+          allResults["subdomains-passive"] = subfinder.output;
+          await execCommand(`echo '${subfinder.output.replace(/'/g, "'\\''")}' > ${workDir}/subdomains-passive.txt`);
+          ctx.ui.notify("✅ Passive subdomain enumeration complete", "info");
+        })(),
+
+        // Certificate transparency
+        (async () => {
+          const crt = await execCommand(
+            `curl -s "https://crt.sh/?q=%25.${target}&output=json" 2>/dev/null | jq -r '.[].name_value' 2>/dev/null | sort -u | head -50 || echo "crt.sh query failed"`,
+            60
+          );
+          allResults["subdomains-crt"] = crt.output;
+          await execCommand(`echo '${crt.output.replace(/'/g, "'\\''")}' > ${workDir}/subdomains-crt.txt`);
+          ctx.ui.notify("✅ Certificate transparency search complete", "info");
+        })(),
+
+        // Common subdomain brute force
+        (async () => {
+          const bruteforce = await execCommand(`
+            for sub in admin api app staging dev test internal grafana kibana jenkins gitlab status docs login auth sso cdn static assets mail smtp vpn portal dashboard billing payments; do
+              result=$(dig +short $sub.${target} A 2>/dev/null)
+              if [ -n "$result" ]; then
+                echo "$sub.${target} -> $result"
+              fi
+            done
+          `, 120);
+          allResults["subdomains-brute"] = bruteforce.output;
+          await execCommand(`echo '${bruteforce.output.replace(/'/g, "'\\''")}' > ${workDir}/subdomains-brute.txt`);
+          ctx.ui.notify("✅ Subdomain brute force complete", "info");
+        })(),
+      ];
+
+      await Promise.all(dnsPromises);
+      state.toolsUsed.push("dig", "subfinder", "crt.sh");
+
+      // Combine subdomains
+      await execCommand(`cat ${workDir}/subdomains-*.txt 2>/dev/null | grep -v "not available\|failed" | cut -d' ' -f1 | sort -u > ${workDir}/all-subdomains.txt`);
+
+      // ============================================================
+      // PHASE 2: INFRASTRUCTURE FINGERPRINTING (Parallel)
+      // ============================================================
+      ctx.ui.notify("🏗️ Phase 2: Infrastructure Fingerprinting...", "info");
+
+      const infraPromises = [
+        // IP and cloud detection
+        (async () => {
+          const infra = await execCommand(`
+            ip=$(dig +short ${target} A | head -1)
+            echo "Primary IP: $ip"
+            if [ -n "$ip" ]; then
+              echo "Reverse DNS: $(dig +short -x $ip)"
+              whois $ip 2>/dev/null | grep -i "orgname\\|netname\\|descr" | head -3
+              # Cloud provider detection
+              case "$ip" in
+                3.*|18.*|34.*|35.*|52.*|54.*|99.*|100.*) echo "Cloud: AWS (IP range)" ;;
+                35.*|34.*|104.*|130.*|142.*) echo "Cloud: Possibly GCP" ;;
+              esac
+            fi
+          `, 30);
+          allResults["infrastructure"] = infra.output;
+          await execCommand(`echo '${infra.output.replace(/'/g, "'\\''")}' > ${workDir}/infrastructure.txt`);
+          ctx.ui.notify("✅ Infrastructure fingerprinting complete", "info");
+        })(),
+
+        // CDN and headers
+        (async () => {
+          const headers = await execCommand(`
+            curl -sI https://${target} 2>/dev/null | head -30
+          `, 30);
+          allResults["headers-main"] = headers.output;
+          await execCommand(`echo '${headers.output.replace(/'/g, "'\\''")}' > ${workDir}/headers-main.txt`);
+          
+          // CDN detection
+          let cdn = "";
+          if (headers.output.toLowerCase().includes("cloudfront") || headers.output.includes("x-amz-cf")) {
+            cdn = "CloudFront";
+          } else if (headers.output.toLowerCase().includes("cf-ray") || headers.output.toLowerCase().includes("cloudflare")) {
+            cdn = "Cloudflare";
+          } else if (headers.output.toLowerCase().includes("akamai")) {
+            cdn = "Akamai";
+          }
+          if (cdn) allResults["cdn"] = cdn;
+          ctx.ui.notify("✅ Response headers collected", "info");
+        })(),
+
+        // S3 bucket enumeration
+        (async () => {
+          const buckets = await execCommand(`
+            domain="${target}"
+            base=$(echo $domain | cut -d. -f1)
+            for pattern in "$base" "${target//./-}"; do
+              for suffix in "" "-assets" "-static" "-uploads" "-backup" "-exports"; do
+                bucket="$pattern$suffix"
+                code=$(curl -s -o /dev/null -w "%{http_code}" "https://$bucket.s3.amazonaws.com" --connect-timeout 3 2>/dev/null)
+                if [ "$code" = "403" ] || [ "$code" = "200" ]; then
+                  echo "S3: $bucket ($code)"
+                fi
+              done
+            done
+          `, 60);
+          allResults["s3-buckets"] = buckets.output;
+          await execCommand(`echo '${buckets.output.replace(/'/g, "'\\''")}' > ${workDir}/s3-buckets.txt`);
+          ctx.ui.notify("✅ S3 bucket enumeration complete", "info");
+        })(),
+      ];
+
+      await Promise.all(infraPromises);
+      state.toolsUsed.push("whois", "curl");
+
+      // ============================================================
+      // PHASE 3: THIRD-PARTY SERVICE DETECTION
+      // ============================================================
+      ctx.ui.notify("🔌 Phase 3: Third-Party Service Detection...", "info");
+
+      const servicesPromises = [
+        // TXT record service detection
+        (async () => {
+          const txt = allResults["dns"] || "";
+          const services: string[] = [];
+          if (txt.includes("google-site-verification")) services.push("Google Workspace");
+          if (txt.includes("stripe-verification")) services.push("Stripe");
+          if (txt.includes("rippling")) services.push("Rippling HR");
+          if (txt.includes("hubspot")) services.push("HubSpot");
+          if (txt.includes("MS=")) services.push("Microsoft 365");
+          if (txt.includes("spf1")) services.push("SPF Configured");
+          allResults["services-dns"] = services.join(", ");
+        })(),
+
+        // Header-based service detection
+        (async () => {
+          const headers = allResults["headers-main"] || "";
+          const services: string[] = [];
+          if (headers.toLowerCase().includes("x-datadog") || headers.toLowerCase().includes("x-dd-")) services.push("Datadog APM");
+          if (headers.toLowerCase().includes("x-newrelic")) services.push("New Relic");
+          if (headers.toLowerCase().includes("sentry")) services.push("Sentry");
+          allResults["services-headers"] = services.join(", ");
+        })(),
+
+        // Frontend JS analysis
+        (async () => {
+          const js = await execCommand(`
+            curl -s https://${target} 2>/dev/null > /tmp/homepage.html
+            curl -s https://app.${target} 2>/dev/null >> /tmp/homepage.html
+            
+            # Extract and download JS
+            grep -oE 'src="[^"]*.js[^"]*"' /tmp/homepage.html | cut -d'"' -f2 | head -10 > /tmp/js-urls.txt
+            
+            # Download JS files
+            for js in $(cat /tmp/js-urls.txt); do
+              if echo "$js" | grep -qE "^/"; then
+                curl -s "https://${target}$js" 2>/dev/null
+              elif echo "$js" | grep -qE "^http"; then
+                curl -s "$js" 2>/dev/null
+              fi
+            done > /tmp/all-js.txt
+            
+            # Detect services
+            services=""
+            grep -qiE "posthog|ph-" /tmp/all-js.txt && services="$services PostHog"
+            grep -qiE "intercom|INTERCOM" /tmp/all-js.txt && services="$services Intercom"
+            grep -qiE "mixpanel" /tmp/all-js.txt && services="$services Mixpanel"
+            grep -qiE "stripe|pk_live_|pk_test_" /tmp/all-js.txt && services="$services Stripe"
+            grep -qiE "sentry|SENTRY" /tmp/all-js.txt && services="$services Sentry"
+            grep -qiE "auth0|AUTH0" /tmp/all-js.txt && services="$services Auth0"
+            grep -qiE "firebase|FIREBASE" /tmp/all-js.txt && services="$services Firebase"
+            grep -qiE "supabase|SUPABASE" /tmp/all-js.txt && services="$services Supabase"
+            grep -qiE "gtag|GA_" /tmp/all-js.txt && services="$services GoogleAnalytics"
+            echo "$services"
+          `, 120);
+          allResults["services-js"] = js.output;
+          ctx.ui.notify("✅ Frontend JS analysis complete", "info");
+        })(),
+
+        // Auth0/OIDC discovery
+        (async () => {
+          const oidc = await execCommand(`
+            for host in login.${target} auth.${target} sso.${target}; do
+              result=$(curl -s "https://$host/.well-known/openid-configuration" --connect-timeout 5 2>/dev/null)
+              if echo "$result" | grep -q "issuer"; then
+                echo "OIDC discovered at $host"
+                echo "$result" | jq -r '.authorization_endpoint, .token_endpoint' 2>/dev/null
+              fi
+            done
+          `, 30);
+          allResults["oidc"] = oidc.output;
+          if (oidc.output.includes("OIDC discovered")) {
+            ctx.ui.notify("✅ OIDC configuration discovered", "info");
+          }
+        })(),
+      ];
+
+      await Promise.all(servicesPromises);
+
+      // ============================================================
+      // PHASE 4: API ENDPOINT DISCOVERY
+      // ============================================================
+      ctx.ui.notify("🔍 Phase 4: API Endpoint Discovery...", "info");
+
+      const endpointPromises = [
+        // Common endpoint brute force
+        (async () => {
+          const endpoints = await execCommand(`
+            for endpoint in /api /api/v1 /api/v2 /graphql /swagger /docs /openapi.json /users /users/ /user /auth /login /admin /admin/ /health /status /metrics /.well-known/openid-configuration; do
+              code=$(curl -s -o /dev/null -w "%{http_code}" "https://api.${target}$endpoint" --connect-timeout 3 2>/dev/null)
+              [ "$code" != "000" ] && [ "$code" != "404" ] && echo "$endpoint -> $code"
+            done
+          `, 120);
+          allResults["endpoints-api"] = endpoints.output;
+          await execCommand(`echo '${endpoints.output.replace(/'/g, "'\\''")}' > ${workDir}/endpoints-api.txt`);
+          ctx.ui.notify("✅ API endpoint discovery complete", "info");
+        })(),
+
+        // User dashboard / admin endpoints (Terrain-specific)
+        (async () => {
+          const dashboard = await execCommand(`
+            for endpoint in /user_dashboard/users /user_dashboard/users/ /user_dashboard/logs /user_dashboard/logs/ /user_dashboard/usage /user_dashboard/rotate_token /user_dashboard/notification_emails /tenants/payments/purchase /tenants/payments/purchases /tenants/payments/packages /tenants/slack/webhook /internal /internal/users /authentication/userinfo; do
+              code=$(curl -s -o /dev/null -w "%{http_code}" "https://api.${target}$endpoint" --connect-timeout 3 2>/dev/null)
+              [ "$code" != "000" ] && echo "$endpoint -> $code"
+            done
+          `, 120);
+          allResults["endpoints-dashboard"] = dashboard.output;
+          await execCommand(`echo '${dashboard.output.replace(/'/g, "'\\''")}' > ${workDir}/endpoints-dashboard.txt`);
+          ctx.ui.notify("✅ Dashboard endpoint discovery complete", "info");
+        })(),
+      ];
+
+      await Promise.all(endpointPromises);
+
+      // ============================================================
+      // PHASE 5: CORS TESTING
+      // ============================================================
+      ctx.ui.notify("🌐 Phase 5: CORS Testing...", "info");
+
+      const cors = await execCommand(`
+        for origin in "https://evil.com" "null" "http://localhost"; do
+          echo "Testing origin: $origin"
+          response=$(curl -sI "https://api.${target}" -H "Origin: $origin" 2>/dev/null)
+          acao=$(echo "$response" | grep -i "access-control-allow-origin")
+          acac=$(echo "$response" | grep -i "access-control-allow-credentials")
+          [ -n "$acao" ] && echo "  ACAO: $acao"
+          [ -n "$acac" ] && echo "  ACAC: $acac"
+          if echo "$acao" | grep -qi "$origin"; then
+            if echo "$acac" | grep -qi "true"; then
+              echo "  ⚠️ CRITICAL: Origin reflected with credentials!"
+            else
+              echo "  ⚠️ Origin reflected (no credentials)"
+            fi
+          fi
+        done
+      `, 60);
+      allResults["cors"] = cors.output;
+      await execCommand(`echo '${cors.output.replace(/'/g, "'\\''")}' > ${workDir}/cors-test.txt`);
+      state.toolsUsed.push("cors-test");
+      ctx.ui.notify("✅ CORS testing complete", "info");
+
+      // ============================================================
+      // PHASE 6: SECURITY HEADERS
+      // ============================================================
+      ctx.ui.notify("🔒 Phase 6: Security Header Analysis...", "info");
+
+      const secHeaders = await execCommand(`
+        echo "=== Security Headers Check ==="
+        headers=$(curl -sI "https://${target}" 2>/dev/null)
+        
+        echo "$headers" | grep -qi "strict-transport-security" && echo "✓ HSTS present" || echo "✗ Missing: HSTS"
+        echo "$headers" | grep -qi "x-frame-options" && echo "✓ X-Frame-Options present" || echo "✗ Missing: X-Frame-Options"
+        echo "$headers" | grep -qi "content-security-policy" && echo "✓ CSP present" || echo "✗ Missing: CSP"
+        echo "$headers" | grep -qi "x-content-type-options" && echo "✓ X-Content-Type-Options present" || echo "✗ Missing: X-Content-Type-Options"
+        
+        echo ""
+        echo "=== Information Leaks ==="
+        echo "$headers" | grep -iE "x-datadog|x-dd-|x-trace|x-request-id|x-powered-by|server:" | head -10
+      `, 30);
+      allResults["security-headers"] = secHeaders.output;
+      await execCommand(`echo '${secHeaders.output.replace(/'/g, "'\\''")}' > ${workDir}/security-headers.txt`);
+      ctx.ui.notify("✅ Security header analysis complete", "info");
+
+      // ============================================================
+      // STORE ALL RESULTS
+      // ============================================================
+      state.scanResults = allResults;
+      pi.appendEntry("redteam-state", state);
+
+      // Calculate duration
+      const duration = Math.round((Date.now() - state.startTime) / 60000);
+
+      ctx.ui.notify(`✅ Full assessment complete in ${duration} minutes.`, "info");
+      ctx.ui.notify(`Results saved to ${workDir}/`, "info");
+
+      // ============================================================
+      // SEND TO LLM FOR ANALYSIS
+      // ============================================================
+      const summaryParts = [];
+
+      if (allResults["dns"]) {
+        summaryParts.push(`## DNS Records\n\`\`\`\n${truncateOutput(allResults["dns"], 30)}\n\`\`\``);
+      }
+
+      // Combine subdomains
+      const subdomains = [
+        allResults["subdomains-passive"],
+        allResults["subdomains-crt"],
+        allResults["subdomains-brute"]
+      ].filter(Boolean).join("\n");
+      if (subdomains) {
+        summaryParts.push(`## Subdomains Discovered\n\`\`\`\n${truncateOutput(subdomains, 40)}\n\`\`\``);
+      }
+
+      if (allResults["infrastructure"]) {
+        summaryParts.push(`## Infrastructure\n\`\`\`\n${truncateOutput(allResults["infrastructure"], 20)}\n\`\`\``);
+      }
+
+      if (allResults["s3-buckets"]) {
+        summaryParts.push(`## S3 Buckets\n\`\`\`\n${allResults["s3-buckets"]}\n\`\`\``);
+      }
+
+      // Third-party services
+      const services = [
+        allResults["services-dns"],
+        allResults["services-headers"],
+        allResults["services-js"]
+      ].filter(Boolean).join(", ");
+      if (services) {
+        summaryParts.push(`## Third-Party Services\n${services}`);
+      }
+
+      if (allResults["oidc"]) {
+        summaryParts.push(`## OIDC/OAuth Discovery\n\`\`\`\n${allResults["oidc"]}\n\`\`\``);
+      }
+
+      if (allResults["endpoints-api"]) {
+        summaryParts.push(`## API Endpoints\n\`\`\`\n${truncateOutput(allResults["endpoints-api"], 30)}\n\`\`\``);
+      }
+
+      if (allResults["endpoints-dashboard"]) {
+        summaryParts.push(`## Dashboard/Admin Endpoints\n\`\`\`\n${truncateOutput(allResults["endpoints-dashboard"], 30)}\n\`\`\``);
+      }
+
+      if (allResults["cors"]) {
+        summaryParts.push(`## CORS Testing\n\`\`\`\n${truncateOutput(allResults["cors"], 30)}\n\`\`\``);
+      }
+
+      if (allResults["security-headers"]) {
+        summaryParts.push(`## Security Headers\n\`\`\`\n${truncateOutput(allResults["security-headers"], 20)}\n\`\`\``);
+      }
+
+      pi.sendUserMessage(
+        `## 🎯 Terrain-Style Security Assessment - ${target}
+
+**Duration:** ${duration} minutes
+**Output Directory:** ${workDir}
+
+${summaryParts.join("\n\n")}
+
+---
+
+## Analysis Tasks:
+
+1. **Create Surface Area Table**: List all discovered hosts, their purpose, and how they were found
+2. **Document Infrastructure**: Cloud provider, CDN, compute platform, storage
+3. **List Third-Party Services**: All detected services with their exposure level
+4. **Identify Critical Findings**: Use \`record_finding\` for each vulnerability
+5. **Check for CORS Issues**: If origin is reflected with credentials, this is CRITICAL
+6. **Note Missing Security Headers**: Each missing header is a finding
+7. **Analyze Accessible Endpoints**: Any 200 responses on dashboard/admin endpoints are concerning
+8. **Generate Terrain-Style Report**: Executive summary, surface area, test results, findings
+
+Be thorough - match the quality of a professional security assessment report.`,
+        { deliverAs: "followUp" }
+      );
+    },
+  });
+
+  pi.registerCommand("subdomain", {
+    description: "🔍 Subdomain enumeration - find all subdomains for a domain",
+    handler: async (args, ctx) => {
+      if (!args) {
+        ctx.ui.notify("Usage: /subdomain <domain>", "error");
+        return;
+      }
+
+      const target = args.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+      ctx.ui.notify(`🔍 Starting subdomain enumeration for ${target}...`, "info");
+
+      const results: string[] = [];
+
+      // Parallel subdomain enumeration
+      const subPromises = [
+        // Subfinder
+        (async () => {
+          ctx.ui.notify("Running: subfinder...", "info");
+          const sf = await execCommand(`subfinder -d ${target} -silent 2>/dev/null | head -100`, 180);
+          results.push(`## Subfinder\n\`\`\`\n${sf.output || "Not available"}\n\`\`\``);
+          return sf.output;
+        })(),
+
+        // Certificate Transparency
+        (async () => {
+          ctx.ui.notify("Running: crt.sh...", "info");
+          const crt = await execCommand(
+            `curl -s "https://crt.sh/?q=%25.${target}&output=json" 2>/dev/null | jq -r '.[].name_value' 2>/dev/null | sort -u | head -100`,
+            60
+          );
+          results.push(`## Certificate Transparency (crt.sh)\n\`\`\`\n${crt.output || "Query failed"}\n\`\`\``);
+          return crt.output;
+        })(),
+
+        // DNS brute force
+        (async () => {
+          ctx.ui.notify("Running: DNS brute force...", "info");
+          const brute = await execCommand(`
+            for sub in admin api app staging dev test qa uat internal grafana prometheus kibana jenkins gitlab github bitbucket status docs login auth sso cdn static assets mail smtp imap vpn portal dashboard billing payments webhook callback oauth api-v1 api-v2 v1 v2 mobile m www www2 blog shop store support help feedback analytics tracking; do
+              result=$(dig +short $sub.${target} A 2>/dev/null | head -1)
+              [ -n "$result" ] && echo "$sub.${target} -> $result"
+            done
+          `, 180);
+          results.push(`## DNS Brute Force\n\`\`\`\n${brute.output || "No results"}\n\`\`\``);
+          return brute.output;
+        })(),
+      ];
+
+      await Promise.all(subPromises);
+
+      state.toolsUsed.push("subfinder", "crt.sh", "dig");
+      pi.appendEntry("redteam-state", state);
+
+      ctx.ui.notify("✅ Subdomain enumeration complete.", "info");
+
+      pi.sendUserMessage(
+        `## Subdomain Enumeration Results for ${target}\n\n${results.join("\n\n")}\n\nAnalyze these results:\n1. Identify all discovered subdomains\n2. Note any interesting services (admin, internal, staging, etc.)\n3. Check for potential subdomain takeover candidates (NXDOMAIN on CNAMEs)\n4. Use \`record_finding\` for any exposed internal services`,
+        { deliverAs: "followUp" }
+      );
+    },
+  });
+
+  pi.registerCommand("services", {
+    description: "🔌 Third-party service detection from DNS, headers, and JS",
+    handler: async (args, ctx) => {
+      if (!args) {
+        ctx.ui.notify("Usage: /services <domain>", "error");
+        return;
+      }
+
+      const target = args.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+      ctx.ui.notify(`🔌 Detecting third-party services for ${target}...`, "info");
+
+      // Run the service detection script
+      const scriptPath = `${__dirname}/skills/redteam/scripts/detect-services.sh`;
+      const result = await execCommand(`bash ${scriptPath} ${target} /tmp/redteam-services-${target} 2>/dev/null || {
+        # Inline detection if script not found
+        echo "=== DNS TXT Records ==="
+        dig +short ${target} TXT
+        echo ""
+        echo "=== MX Records ==="
+        dig +short ${target} MX
+        echo ""
+        echo "=== Response Headers ==="
+        curl -sI https://${target} 2>/dev/null | grep -iE "x-datadog|x-newrelic|sentry|cloudflare|cloudfront|server:|x-powered-by"
+      }`, 120);
+
+      state.toolsUsed.push("service-detection");
+      pi.appendEntry("redteam-state", state);
+
+      ctx.ui.notify("✅ Service detection complete.", "info");
+
+      pi.sendUserMessage(
+        `## Third-Party Service Detection for ${target}\n\n${truncateOutput(result.output, 100)}\n\nAnalyze these services:\n1. List all detected services with their purpose\n2. Note exposure level (public keys, tenant IDs, etc.)\n3. Identify any security-sensitive services (auth, payments, etc.)\n4. Use \`record_finding\` for any exposed secrets or misconfigurations`,
+        { deliverAs: "followUp" }
+      );
+    },
+  });
+
+  pi.registerCommand("cors", {
+    description: "🌐 CORS misconfiguration testing",
+    handler: async (args, ctx) => {
+      if (!args) {
+        ctx.ui.notify("Usage: /cors <api_url>", "error");
+        return;
+      }
+
+      let target = args.trim();
+      if (!target.startsWith("http")) {
+        target = `https://${target}`;
+      }
+
+      ctx.ui.notify(`🌐 Testing CORS for ${target}...`, "info");
+
+      const cors = await execCommand(`
+        echo "=== CORS Security Test ==="
+        echo ""
+        
+        for origin in "https://evil.com" "https://attacker.com" "null" "http://localhost" "http://127.0.0.1:3000"; do
+          echo "Testing origin: $origin"
+          response=$(curl -sI "${target}" -H "Origin: $origin" 2>/dev/null)
+          
+          acao=$(echo "$response" | grep -i "^access-control-allow-origin:" | tr -d '\r')
+          acac=$(echo "$response" | grep -i "^access-control-allow-credentials:" | tr -d '\r')
+          
+          [ -n "$acao" ] && echo "  ACAO: $acao"
+          [ -n "$acac" ] && echo "  ACAC: $acac"
+          
+          if echo "$acao" | grep -qi "$origin\|\\*"; then
+            if echo "$acac" | grep -qi "true"; then
+              echo "  🔴 CRITICAL: Origin reflected/wildcard with credentials allowed!"
+            else
+              echo "  🟠 Origin reflected or wildcard (without credentials)"
+            fi
+          fi
+          echo ""
+        done
+        
+        echo "=== Preflight Test ==="
+        curl -sI "${target}" -X OPTIONS \
+          -H "Origin: https://evil.com" \
+          -H "Access-Control-Request-Method: POST" \
+          -H "Access-Control-Request-Headers: Authorization" 2>/dev/null | grep -iE "access-control"
+      `, 60);
+
+      state.toolsUsed.push("cors-test");
+      pi.appendEntry("redteam-state", state);
+
+      ctx.ui.notify("✅ CORS testing complete.", "info");
+
+      pi.sendUserMessage(
+        `## CORS Security Test Results for ${target}\n\n\`\`\`\n${cors.output}\n\`\`\`\n\n**Analysis:**\n1. If origin is reflected AND credentials are allowed, this is **CRITICAL**\n2. Any website can make authenticated requests on behalf of users\n3. Use \`record_finding\` with severity CRITICAL if vulnerable\n\n**Impact if vulnerable:**\n- Attacker can steal user data via malicious website\n- Can access API tokens, billing info, user databases\n- Full account takeover possible`,
+        { deliverAs: "followUp" }
+      );
+    },
+  });
+
+  pi.registerCommand("endpoints", {
+    description: "🔎 API endpoint discovery and method testing",
+    handler: async (args, ctx) => {
+      if (!args) {
+        ctx.ui.notify("Usage: /endpoints <api_base_url>", "error");
+        return;
+      }
+
+      let target = args.trim();
+      if (!target.startsWith("http")) {
+        target = `https://${target}`;
+      }
+      // Remove trailing slash
+      target = target.replace(/\/$/, "");
+
+      ctx.ui.notify(`🔎 Discovering endpoints for ${target}...`, "info");
+
+      const endpoints = await execCommand(`
+        base="${target}"
+        
+        echo "| Method | Endpoint | Status | Notes |"
+        echo "|--------|----------|--------|-------|"
+        
+        for endpoint in / /api /api/v1 /api/v2 /v1 /v2 /graphql /users /users/ /user /user/me /auth /auth/login /auth/signup /admin /admin/ /health /status /docs /swagger /openapi.json /.well-known/openid-configuration /user_dashboard/users /user_dashboard/users/ /user_dashboard/logs /internal /tenants /billing /payments; do
+          for method in GET POST; do
+            response=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X $method "$base$endpoint" \
+              -H "Content-Type: application/json" \
+              -d '{}' --connect-timeout 5 2>/dev/null)
+            
+            # Skip connection failures and 404s
+            [ "$response" = "000" ] && continue
+            [ "$response" = "404" ] && continue
+            
+            # Analyze response
+            notes=""
+            case "$response" in
+              200) 
+                if grep -qiE "api_key|token|password|secret" /tmp/resp.txt 2>/dev/null; then
+                  notes="⚠️ Sensitive data"
+                elif grep -qiE '"count":|"results":' /tmp/resp.txt 2>/dev/null; then
+                  notes="📊 List data"
+                else
+                  notes="✓ OK"
+                fi
+                ;;
+              201) notes="✓ Created" ;;
+              400) notes="Bad request" ;;
+              401) notes="Auth required" ;;
+              402) notes="Payment required" ;;
+              403) notes="Forbidden" ;;
+              405) notes="Method not allowed" ;;
+              500) notes="Server error" ;;
+              *) notes="" ;;
+            esac
+            
+            echo "| $method | $endpoint | $response | $notes |"
+          done
+        done
+      `, 300);
+
+      state.toolsUsed.push("endpoint-discovery");
+      pi.appendEntry("redteam-state", state);
+
+      ctx.ui.notify("✅ Endpoint discovery complete.", "info");
+
+      pi.sendUserMessage(
+        `## API Endpoint Discovery for ${target}\n\n${endpoints.output}\n\n**Analysis:**\n1. Any 200 responses on sensitive endpoints (user_dashboard, admin, internal) need investigation\n2. Check if list endpoints expose all users/data (broken access control)\n3. Note endpoints returning "Sensitive data" - these may leak tokens/secrets\n4. Use \`record_finding\` for each security issue discovered`,
+        { deliverAs: "followUp" }
+      );
+    },
+  });
+
+  pi.registerCommand("tools", {
+    description: "🔧 Check and install red team tools",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify("🔧 Checking tool availability...", "info");
+
+      const check = await execCommand(`
+        echo "| Tool | Status | Description |"
+        echo "|------|--------|-------------|"
+        
+        check_tool() {
+          local tool=$1
+          local desc=$2
+          if command -v $tool &>/dev/null; then
+            echo "| $tool | ✓ Installed | $desc |"
+          else
+            echo "| $tool | ✗ Missing | $desc |"
+          fi
+        }
+        
+        check_tool nmap "Port scanner"
+        check_tool dig "DNS lookup"
+        check_tool curl "HTTP client"
+        check_tool jq "JSON processor"
+        check_tool whois "WHOIS lookup"
+        check_tool subfinder "Subdomain enumeration"
+        check_tool httpx "HTTP prober"
+        check_tool dnsx "DNS toolkit"
+        check_tool nuclei "Vulnerability scanner"
+        check_tool nikto "Web scanner"
+        check_tool gobuster "Directory brute force"
+        check_tool sqlmap "SQL injection"
+        check_tool hydra "Brute force"
+        check_tool whatweb "Web fingerprinting"
+        check_tool ffuf "Web fuzzer"
+      `, 30);
+
+      ctx.ui.notify("✅ Tool check complete.", "info");
+
+      pi.sendUserMessage(
+        `## Red Team Tool Availability\n\n${check.output}\n\n**To install missing tools:**\n\`\`\`bash\n# Arch Linux\nyay -S subfinder httpx nuclei nmap nikto gobuster sqlmap hydra\n\n# Debian/Ubuntu/Kali\nsudo apt install nmap nikto gobuster sqlmap hydra\ngo install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest\ngo install github.com/projectdiscovery/httpx/cmd/httpx@latest\ngo install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest\n\`\`\``,
+        { deliverAs: "followUp" }
+      );
     },
   });
 }

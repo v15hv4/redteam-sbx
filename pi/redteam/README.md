@@ -29,7 +29,8 @@ your-project/
 
 | Command | Description |
 |---------|-------------|
-| `/redteam <target>` | 🚀 **Full parallel scan** - runs nmap, nikto, nuclei, gobuster simultaneously |
+| `/redteam <domain>` | 🎯 **Terrain-style assessment** - subdomains, infrastructure, services, endpoints, CORS |
+| `/redteam-quick <target>` | 🚀 **Quick parallel scan** - nmap, nikto, nuclei, gobuster simultaneously |
 
 ### Individual Scans
 
@@ -41,6 +42,16 @@ your-project/
 | `/webscan <url>` | 🌐 Web directory enumeration and sensitive file check |
 | `/sqli <url>` | 💉 SQL injection testing with sqlmap |
 | `/bruteforce <target> <service>` | 🔑 Credential brute force (ssh, ftp, http-post) |
+
+### Reconnaissance
+
+| Command | Description |
+|---------|-------------|
+| `/subdomain <domain>` | 🔍 Subdomain enumeration (subfinder, crt.sh, DNS brute) |
+| `/services <domain>` | 🔌 Third-party service detection (DNS, headers, JS) |
+| `/cors <api_url>` | 🌐 CORS misconfiguration testing |
+| `/endpoints <api_url>` | 🔎 API endpoint discovery with method testing |
+| `/tools` | 🔧 Check tool availability and show install commands |
 
 ### Reporting
 

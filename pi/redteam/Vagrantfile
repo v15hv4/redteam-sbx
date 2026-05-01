@@ -1,0 +1,383 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# Red Team Security Assessment VM
+# Includes all tools needed for Terrain-style security assessments
+
+Vagrant.configure("2") do |config|
+  # Use Kali Linux for comprehensive security tooling
+  # Alternative: "debian/bookworm64" or "ubuntu/jammy64"
+  config.vm.box = "kalilinux/rolling"
+  config.vm.box_version = ">= 2024.1.0"
+  
+  # Fallback to Debian if Kali not available
+  config.vm.box_url = [
+    "https://app.vagrantup.com/kalilinux/boxes/rolling",
+    "https://app.vagrantup.com/debian/boxes/bookworm64"
+  ]
+
+  config.vm.hostname = "redteam"
+  
+  # Network configuration
+  config.vm.network "private_network", type: "dhcp"
+  
+  # Port forwarding for local testing
+  config.vm.network "forwarded_port", guest: 8080, host: 8080  # Local web server
+  config.vm.network "forwarded_port", guest: 3000, host: 3000  # Dev server
+
+  # VM resources
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "redteam-vm"
+    vb.memory = "4096"
+    vb.cpus = 2
+    
+    # Performance optimizations
+    vb.customize ["modifyvm", :id, "--ioapic", "on"]
+    vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+  end
+
+  config.vm.provider "libvirt" do |lv|
+    lv.memory = 4096
+    lv.cpus = 2
+  end
+
+  # Sync the project directory
+  config.vm.synced_folder ".", "/home/vagrant/redteam", type: "rsync",
+    rsync__exclude: [".git/", "node_modules/", ".vagrant/"]
+
+  # Provisioning script - install all security tools
+  config.vm.provision "shell", inline: <<-SHELL
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    
+    echo "=========================================="
+    echo "Red Team VM Provisioning"
+    echo "=========================================="
+    
+    # ============================================================
+    # System Update
+    # ============================================================
+    echo "[1/10] Updating system packages..."
+    apt-get update -qq
+    apt-get upgrade -y -qq
+    
+    # ============================================================
+    # Core Dependencies
+    # ============================================================
+    echo "[2/10] Installing core dependencies..."
+    apt-get install -y -qq \
+      build-essential \
+      git \
+      curl \
+      wget \
+      jq \
+      dnsutils \
+      whois \
+      net-tools \
+      iputils-ping \
+      ca-certificates \
+      gnupg \
+      unzip \
+      python3 \
+      python3-pip \
+      python3-venv \
+      libssl-dev \
+      libffi-dev \
+      chromium \
+      chromium-driver
+    
+    # ============================================================
+    # Security Tools (via apt)
+    # ============================================================
+    echo "[3/10] Installing security tools via apt..."
+    apt-get install -y -qq \
+      nmap \
+      nikto \
+      gobuster \
+      dirb \
+      sqlmap \
+      hydra \
+      whatweb \
+      sslscan \
+      masscan \
+      fierce \
+      dnsenum \
+      dnsrecon \
+      wfuzz \
+      arjun \
+      ffuf \
+      testssl.sh \
+      httpie \
+      2>/dev/null || true
+    
+    # ============================================================
+    # Go Installation
+    # ============================================================
+    echo "[4/10] Installing Go..."
+    GO_VERSION="1.22.2"
+    if ! command -v go &> /dev/null; then
+      wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -O /tmp/go.tar.gz
+      rm -rf /usr/local/go
+      tar -C /usr/local -xzf /tmp/go.tar.gz
+      rm /tmp/go.tar.gz
+    fi
+    
+    # Set up Go environment for vagrant user
+    cat >> /home/vagrant/.bashrc << 'EOF'
+
+# Go environment
+export GOROOT=/usr/local/go
+export GOPATH=$HOME/go
+export PATH=$PATH:$GOROOT/bin:$GOPATH/bin
+EOF
+    
+    export GOROOT=/usr/local/go
+    export GOPATH=/home/vagrant/go
+    export PATH=$PATH:$GOROOT/bin:$GOPATH/bin
+    
+    mkdir -p /home/vagrant/go/bin
+    chown -R vagrant:vagrant /home/vagrant/go
+    
+    # ============================================================
+    # ProjectDiscovery Tools (Go-based)
+    # ============================================================
+    echo "[5/10] Installing ProjectDiscovery tools..."
+    
+    # Install as vagrant user
+    su - vagrant -c '
+      export GOROOT=/usr/local/go
+      export GOPATH=$HOME/go
+      export PATH=$PATH:$GOROOT/bin:$GOPATH/bin
+      
+      # Subdomain enumeration
+      go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest 2>/dev/null || true
+      
+      # HTTP probing
+      go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest 2>/dev/null || true
+      
+      # DNS toolkit
+      go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest 2>/dev/null || true
+      
+      # Vulnerability scanner
+      go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest 2>/dev/null || true
+      
+      # Web crawler
+      go install -v github.com/projectdiscovery/katana/cmd/katana@latest 2>/dev/null || true
+      
+      # Port scanner
+      go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest 2>/dev/null || true
+      
+      # CHAOS client
+      go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest 2>/dev/null || true
+      
+      # Interactsh client
+      go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest 2>/dev/null || true
+      
+      # MapCIDR
+      go install -v github.com/projectdiscovery/mapcidr/cmd/mapcidr@latest 2>/dev/null || true
+      
+      # Uncover
+      go install -v github.com/projectdiscovery/uncover/cmd/uncover@latest 2>/dev/null || true
+      
+      # Notify
+      go install -v github.com/projectdiscovery/notify/cmd/notify@latest 2>/dev/null || true
+    '
+    
+    # ============================================================
+    # Additional Go Tools
+    # ============================================================
+    echo "[6/10] Installing additional Go tools..."
+    
+    su - vagrant -c '
+      export GOROOT=/usr/local/go
+      export GOPATH=$HOME/go
+      export PATH=$PATH:$GOROOT/bin:$GOPATH/bin
+      
+      # URL extraction
+      go install -v github.com/tomnomnom/waybackurls@latest 2>/dev/null || true
+      go install -v github.com/lc/gau/v2/cmd/gau@latest 2>/dev/null || true
+      
+      # Parameter discovery
+      go install -v github.com/tomnomnom/qsreplace@latest 2>/dev/null || true
+      go install -v github.com/tomnomnom/unfurl@latest 2>/dev/null || true
+      
+      # CORS testing
+      go install -v github.com/s0md3v/Corsy@latest 2>/dev/null || true
+      
+      # Header analysis
+      go install -v github.com/tomnomnom/hacks/headers@latest 2>/dev/null || true
+      
+      # JSON extraction
+      go install -v github.com/tomnomnom/gron@latest 2>/dev/null || true
+      
+      # Subdomain takeover
+      go install -v github.com/haccer/subjack@latest 2>/dev/null || true
+      
+      # S3 bucket testing
+      go install -v github.com/sa7mon/S3Scanner@latest 2>/dev/null || true
+      
+      # Git secrets
+      go install -v github.com/zricethezav/gitleaks/v8@latest 2>/dev/null || true
+      
+      # Secret scanning
+      go install -v github.com/trufflesecurity/trufflehog/v3@latest 2>/dev/null || true
+    '
+    
+    # ============================================================
+    # Python Tools
+    # ============================================================
+    echo "[7/10] Installing Python tools..."
+    
+    pip3 install --break-system-packages -q \
+      wafw00f \
+      dirsearch \
+      sslyze \
+      jwt-tool \
+      pyjwt \
+      requests \
+      beautifulsoup4 \
+      lxml \
+      2>/dev/null || true
+    
+    # ============================================================
+    # Node.js Installation (for Pi)
+    # ============================================================
+    echo "[8/10] Installing Node.js..."
+    
+    if ! command -v node &> /dev/null; then
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+      apt-get install -y -qq nodejs
+    fi
+    
+    npm install -g pnpm 2>/dev/null || true
+    
+    # ============================================================
+    # Wordlists
+    # ============================================================
+    echo "[9/10] Installing wordlists..."
+    
+    SECLISTS_DIR="/usr/share/seclists"
+    if [ ! -d "$SECLISTS_DIR" ]; then
+      apt-get install -y -qq seclists 2>/dev/null || \
+        git clone --depth 1 https://github.com/danielmiessler/SecLists.git "$SECLISTS_DIR"
+    fi
+    
+    # Common wordlists directory
+    mkdir -p /usr/share/wordlists
+    ln -sf "$SECLISTS_DIR" /usr/share/wordlists/seclists 2>/dev/null || true
+    
+    # ============================================================
+    # Nuclei Templates
+    # ============================================================
+    echo "[10/10] Updating Nuclei templates..."
+    
+    su - vagrant -c '
+      export PATH=$PATH:$HOME/go/bin
+      nuclei -update-templates 2>/dev/null || true
+    '
+    
+    # ============================================================
+    # Final Setup
+    # ============================================================
+    
+    # Create tools check script
+    cat > /usr/local/bin/check-tools << 'EOF'
+#!/bin/bash
+echo "Red Team Tool Status"
+echo "===================="
+echo ""
+
+tools=(
+  "nmap:Port scanner"
+  "dig:DNS lookup"
+  "curl:HTTP client"
+  "jq:JSON processor"
+  "whois:WHOIS lookup"
+  "subfinder:Subdomain enumeration"
+  "httpx:HTTP prober"
+  "dnsx:DNS toolkit"
+  "nuclei:Vulnerability scanner"
+  "nikto:Web scanner"
+  "gobuster:Directory brute force"
+  "sqlmap:SQL injection"
+  "hydra:Brute force"
+  "whatweb:Web fingerprinting"
+  "sslscan:SSL/TLS scanner"
+  "ffuf:Web fuzzer"
+  "katana:Web crawler"
+  "waybackurls:Wayback URLs"
+  "gau:GetAllUrls"
+  "gitleaks:Git secrets"
+  "trufflehog:Secret scanner"
+  "masscan:Fast port scanner"
+  "wfuzz:Web fuzzer"
+  "arjun:Parameter discovery"
+  "wafw00f:WAF detection"
+)
+
+echo "| Tool | Status | Description |"
+echo "|------|--------|-------------|"
+
+for item in "${tools[@]}"; do
+  tool="${item%%:*}"
+  desc="${item#*:}"
+  if command -v "$tool" &> /dev/null; then
+    echo "| $tool | ✓ | $desc |"
+  else
+    echo "| $tool | ✗ | $desc |"
+  fi
+done
+EOF
+    chmod +x /usr/local/bin/check-tools
+    
+    # Create convenience aliases
+    cat >> /home/vagrant/.bashrc << 'EOF'
+
+# Red Team Aliases
+alias tools='check-tools'
+alias rt='cd ~/redteam'
+alias scan='nmap -sV -sC'
+alias fastscan='nmap -T4 --top-ports 1000'
+alias dirscan='gobuster dir -w /usr/share/seclists/Discovery/Web-Content/common.txt'
+alias subscan='subfinder -silent'
+alias vulnscan='nuclei -severity critical,high,medium'
+
+# Add Go bin to path
+export PATH=$PATH:$HOME/go/bin
+EOF
+    
+    chown -R vagrant:vagrant /home/vagrant
+    
+    echo ""
+    echo "=========================================="
+    echo "Red Team VM Setup Complete!"
+    echo "=========================================="
+    echo ""
+    echo "Run 'check-tools' to verify installation"
+    echo "Project mounted at: /home/vagrant/redteam"
+    echo ""
+  SHELL
+
+  # Post-provision message
+  config.vm.post_up_message = <<-MSG
+  
+  ╔══════════════════════════════════════════════════════════════╗
+  ║                    Red Team VM Ready!                        ║
+  ╠══════════════════════════════════════════════════════════════╣
+  ║                                                              ║
+  ║  SSH: vagrant ssh                                            ║
+  ║  Project: /home/vagrant/redteam                              ║
+  ║                                                              ║
+  ║  Commands:                                                   ║
+  ║    check-tools    - Verify tool installation                 ║
+  ║    rt             - Change to project directory              ║
+  ║                                                              ║
+  ║  Quick scans:                                                ║
+  ║    subscan -d example.com                                    ║
+  ║    fastscan example.com                                      ║
+  ║    vulnscan -u https://example.com                           ║
+  ║                                                              ║
+  ╚══════════════════════════════════════════════════════════════╝
+  
+  MSG
+end
