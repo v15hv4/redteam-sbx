@@ -1896,7 +1896,7 @@ Use \`record_finding\` to document WAF presence and any bypasses found.`,
               vulnerable="🟡 NXDOMAIN"
             fi
             
-            echo "| $sub | $cname | ${ip:-NXDOMAIN} | $vulnerable |"
+            echo "| $sub | $cname | \${ip:-NXDOMAIN} | $vulnerable |"
           fi
         done | head -50
       `, 300);
