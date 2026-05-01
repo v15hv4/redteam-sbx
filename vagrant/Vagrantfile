@@ -48,6 +48,10 @@ Vagrant.configure("2") do |config|
       wordlists \
       nodejs \
       npm
+
+    # fix perms for pi installation
+    mkdir /usr/local/lib/node_modules
+    setfacl -m u:vagrant:rwx /usr/local/lib/node_modules /usr/local/bin
     
     echo "Kali Linux Pentest environment ready!"
   SHELL
