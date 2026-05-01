@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { execSync, spawn } from "child_process";
+import { spawn } from "child_process";
 
 // System prompt - now focused on ANALYSIS only, not execution
 const REDTEAM_SYSTEM_PROMPT = `
@@ -43,46 +43,39 @@ const SEVERITY_EMOJI: Record<Finding["severity"], string> = {
   info: "⚪",
 };
 
-// Helper to execute a command and return output
-function execCommand(cmd: string, timeoutSec: number = 300): { output: string; error: boolean } {
-  try {
-    const output = execSync(cmd, {
-      encoding: "utf-8",
-      timeout: timeoutSec * 1000,
-      maxBuffer: 10 * 1024 * 1024, // 10MB
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    return { output: output.trim(), error: false };
-  } catch (e: any) {
-    // execSync throws on non-zero exit, but we still want the output
-    const stdout = e.stdout?.toString() || "";
-    const stderr = e.stderr?.toString() || "";
-    return { output: stdout + "\n" + stderr, error: true };
-  }
-}
-
-// Helper to run command async and stream output
-function execCommandAsync(cmd: string, onOutput: (data: string) => void): Promise<string> {
+// Helper to execute a command asynchronously (non-blocking)
+function execCommand(cmd: string, timeoutSec: number = 300): Promise<{ output: string; error: boolean }> {
   return new Promise((resolve) => {
     const proc = spawn("bash", ["-c", cmd], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     let output = "";
+    let error = false;
+
+    const timeout = setTimeout(() => {
+      proc.kill("SIGKILL");
+      error = true;
+      output += "\n[TIMEOUT]";
+    }, timeoutSec * 1000);
 
     proc.stdout?.on("data", (data) => {
-      const text = data.toString();
-      output += text;
-      onOutput(text);
+      output += data.toString();
     });
 
     proc.stderr?.on("data", (data) => {
-      const text = data.toString();
-      output += text;
-      onOutput(text);
+      output += data.toString();
     });
 
-    proc.on("close", () => resolve(output));
-    proc.on("error", () => resolve(output));
+    proc.on("close", (code) => {
+      clearTimeout(timeout);
+      error = error || code !== 0;
+      resolve({ output: output.trim(), error });
+    });
+
+    proc.on("error", (err) => {
+      clearTimeout(timeout);
+      resolve({ output: output + "\n" + err.message, error: true });
+    });
   });
 }
 
@@ -142,19 +135,19 @@ export default function (pi: ExtensionAPI) {
 
       // 1. Quick port scan
       ctx.ui.notify("Running: nmap quick scan...", "info");
-      const nmapQuick = execCommand(`nmap -sS -T4 --top-ports 1000 ${target} 2>/dev/null`, 120);
+      const nmapQuick = await execCommand(`nmap -sS -T4 --top-ports 1000 ${target} 2>/dev/null`, 120);
       results.push("## Nmap Quick Scan (Top 1000 ports)\n```\n" + truncateOutput(nmapQuick.output) + "\n```");
       state.scanResults["nmap-quick"] = nmapQuick.output;
 
       // 2. Service version detection on common ports
       ctx.ui.notify("Running: nmap service detection...", "info");
-      const nmapSvc = execCommand(`nmap -sV -sC -p 21,22,23,25,53,80,110,143,443,445,993,995,3306,3389,5432,8080,8443 ${target} 2>/dev/null`, 180);
+      const nmapSvc = await execCommand(`nmap -sV -sC -p 21,22,23,25,53,80,110,143,443,445,993,995,3306,3389,5432,8080,8443 ${target} 2>/dev/null`, 180);
       results.push("## Nmap Service Detection\n```\n" + truncateOutput(nmapSvc.output) + "\n```");
       state.scanResults["nmap-services"] = nmapSvc.output;
 
       // 3. Web technology detection (if port 80/443 likely open)
       ctx.ui.notify("Running: whatweb...", "info");
-      const whatweb = execCommand(`whatweb -a 3 http://${target} https://${target} 2>/dev/null`, 60);
+      const whatweb = await execCommand(`whatweb -a 3 http://${target} https://${target} 2>/dev/null`, 60);
       if (whatweb.output.trim()) {
         results.push("## Web Technology Detection\n```\n" + truncateOutput(whatweb.output) + "\n```");
         state.scanResults["whatweb"] = whatweb.output;
@@ -162,7 +155,7 @@ export default function (pi: ExtensionAPI) {
 
       // 4. DNS enumeration
       ctx.ui.notify("Running: DNS enumeration...", "info");
-      const dns = execCommand(`dig ${target} ANY +short 2>/dev/null; dig ${target} MX +short 2>/dev/null; dig ${target} NS +short 2>/dev/null`, 30);
+      const dns = await execCommand(`dig ${target} ANY +short 2>/dev/null; dig ${target} MX +short 2>/dev/null; dig ${target} NS +short 2>/dev/null`, 30);
       if (dns.output.trim()) {
         results.push("## DNS Records\n```\n" + truncateOutput(dns.output) + "\n```");
         state.scanResults["dns"] = dns.output;
@@ -207,12 +200,12 @@ ${combinedResults}`,
 
       // Full TCP scan
       ctx.ui.notify("Running: nmap full TCP scan (this may take a while)...", "info");
-      const tcpScan = execCommand(`nmap -sS -p- --min-rate=3000 -T4 ${target} 2>/dev/null`, 600);
+      const tcpScan = await execCommand(`nmap -sS -p- --min-rate=3000 -T4 ${target} 2>/dev/null`, 600);
       state.scanResults["nmap-full-tcp"] = tcpScan.output;
 
       // Top UDP ports
       ctx.ui.notify("Running: nmap UDP scan (top 100)...", "info");
-      const udpScan = execCommand(`nmap -sU --top-ports 100 --min-rate=1000 ${target} 2>/dev/null`, 300);
+      const udpScan = await execCommand(`nmap -sU --top-ports 100 --min-rate=1000 ${target} 2>/dev/null`, 300);
       state.scanResults["nmap-udp"] = udpScan.output;
 
       pi.appendEntry("redteam-state", state);
@@ -259,13 +252,13 @@ Analyze these results:
 
       // Nmap vuln scripts
       ctx.ui.notify("Running: nmap vulnerability scripts...", "info");
-      const nmapVuln = execCommand(`nmap --script=vuln -p 21,22,23,25,53,80,110,143,443,445,993,995,3306,3389,5432,8080,8443 ${target} 2>/dev/null`, 300);
+      const nmapVuln = await execCommand(`nmap --script=vuln -p 21,22,23,25,53,80,110,143,443,445,993,995,3306,3389,5432,8080,8443 ${target} 2>/dev/null`, 300);
       results.push("## Nmap Vulnerability Scripts\n```\n" + truncateOutput(nmapVuln.output) + "\n```");
       state.scanResults["nmap-vuln"] = nmapVuln.output;
 
       // Nikto (web vuln scanner)
       ctx.ui.notify("Running: nikto web scanner...", "info");
-      const nikto = execCommand(`nikto -h http://${target} -C all -Tuning x 2>/dev/null | head -100`, 180);
+      const nikto = await execCommand(`nikto -h http://${target} -C all -Tuning x 2>/dev/null | head -100`, 180);
       if (nikto.output.trim() && !nikto.output.includes("No web server")) {
         results.push("## Nikto Web Scanner\n```\n" + truncateOutput(nikto.output) + "\n```");
         state.scanResults["nikto"] = nikto.output;
@@ -273,7 +266,7 @@ Analyze these results:
 
       // Nuclei (if available)
       ctx.ui.notify("Running: nuclei vulnerability scanner...", "info");
-      const nuclei = execCommand(`nuclei -u http://${target} -severity critical,high,medium -silent 2>/dev/null | head -50`, 300);
+      const nuclei = await execCommand(`nuclei -u http://${target} -severity critical,high,medium -silent 2>/dev/null | head -50`, 300);
       if (nuclei.output.trim()) {
         results.push("## Nuclei Scanner\n```\n" + truncateOutput(nuclei.output) + "\n```");
         state.scanResults["nuclei"] = nuclei.output;
@@ -281,7 +274,7 @@ Analyze these results:
 
       // SSL/TLS check
       ctx.ui.notify("Running: SSL/TLS analysis...", "info");
-      const ssl = execCommand(`timeout 30 sslscan ${target} 2>/dev/null || timeout 30 openssl s_client -connect ${target}:443 </dev/null 2>/dev/null | openssl x509 -noout -text 2>/dev/null | head -50`, 60);
+      const ssl = await execCommand(`timeout 30 sslscan ${target} 2>/dev/null || timeout 30 openssl s_client -connect ${target}:443 </dev/null 2>/dev/null | openssl x509 -noout -text 2>/dev/null | head -50`, 60);
       if (ssl.output.trim()) {
         results.push("## SSL/TLS Analysis\n```\n" + truncateOutput(ssl.output) + "\n```");
         state.scanResults["ssl"] = ssl.output;
@@ -327,7 +320,7 @@ Analyze these vulnerability scan results:
 
       // Directory enumeration
       ctx.ui.notify("Running: directory enumeration...", "info");
-      const gobuster = execCommand(
+      const gobuster = await execCommand(
         `gobuster dir -u ${target} -w /usr/share/seclists/Discovery/Web-Content/common.txt -t 30 -q 2>/dev/null || ` +
         `gobuster dir -u ${target} -w /usr/share/wordlists/dirb/common.txt -t 30 -q 2>/dev/null || ` +
         `dirb ${target} /usr/share/dirb/wordlists/common.txt -S 2>/dev/null | head -50`,
@@ -345,7 +338,7 @@ Analyze these vulnerability scan results:
       ];
       const fileChecks: string[] = [];
       for (const file of sensitiveFiles) {
-        const check = execCommand(`curl -s -o /dev/null -w "%{http_code}" "${target}/${file}" 2>/dev/null`, 10);
+        const check = await execCommand(`curl -s -o /dev/null -w "%{http_code}" "${target}/${file}" 2>/dev/null`, 10);
         if (check.output.trim() === "200") {
           fileChecks.push(`✅ FOUND: ${file}`);
         }
@@ -356,7 +349,7 @@ Analyze these vulnerability scan results:
 
       // HTTP headers analysis
       ctx.ui.notify("Running: HTTP headers analysis...", "info");
-      const headers = execCommand(`curl -sI "${target}" 2>/dev/null | head -30`, 30);
+      const headers = await execCommand(`curl -sI "${target}" 2>/dev/null | head -30`, 30);
       results.push("## HTTP Headers\n```\n" + truncateOutput(headers.output) + "\n```");
       state.scanResults["headers"] = headers.output;
 
@@ -395,7 +388,7 @@ Analyze these web scan results:
 
       // SQLMap scan
       ctx.ui.notify("Running: sqlmap...", "info");
-      const sqlmap = execCommand(
+      const sqlmap = await execCommand(
         `sqlmap -u "${target}" --batch --level=3 --risk=2 --threads=4 --output-dir=/tmp/sqlmap-output 2>/dev/null | tail -100`,
         300
       );
@@ -454,7 +447,7 @@ Analyze the SQLMap results:
       }
 
       ctx.ui.notify(`Running: hydra ${service}...`, "info");
-      const hydra = execCommand(hydraCmd, 300);
+      const hydra = await execCommand(hydraCmd, 300);
       state.scanResults["hydra"] = hydra.output;
 
       pi.appendEntry("redteam-state", state);
@@ -505,28 +498,28 @@ Analyze the brute force results:
       const scanPromises = [
         // Port scan
         (async () => {
-          const result = execCommand(`nmap -sS -sV -sC -T4 --top-ports 1000 ${target} 2>/dev/null`, 300);
+          const result = await execCommand(`nmap -sS -sV -sC -T4 --top-ports 1000 ${target} 2>/dev/null`, 300);
           allResults["nmap"] = result.output;
           ctx.ui.notify("✅ nmap complete", "info");
         })(),
 
         // Web tech
         (async () => {
-          const result = execCommand(`whatweb -a 3 http://${target} https://${target} 2>/dev/null`, 60);
+          const result = await execCommand(`whatweb -a 3 http://${target} https://${target} 2>/dev/null`, 60);
           allResults["whatweb"] = result.output;
           ctx.ui.notify("✅ whatweb complete", "info");
         })(),
 
         // Nikto
         (async () => {
-          const result = execCommand(`nikto -h http://${target} -Tuning x 2>/dev/null | head -80`, 180);
+          const result = await execCommand(`nikto -h http://${target} -Tuning x 2>/dev/null | head -80`, 180);
           allResults["nikto"] = result.output;
           ctx.ui.notify("✅ nikto complete", "info");
         })(),
 
         // Directory enum
         (async () => {
-          const result = execCommand(
+          const result = await execCommand(
             `gobuster dir -u http://${target} -w /usr/share/seclists/Discovery/Web-Content/common.txt -t 30 -q 2>/dev/null || ` +
             `dirb http://${target} /usr/share/dirb/wordlists/common.txt -S 2>/dev/null | head -50`,
             180
@@ -537,14 +530,14 @@ Analyze the brute force results:
 
         // Nuclei
         (async () => {
-          const result = execCommand(`nuclei -u http://${target} -severity critical,high,medium -silent 2>/dev/null | head -30`, 300);
+          const result = await execCommand(`nuclei -u http://${target} -severity critical,high,medium -silent 2>/dev/null | head -30`, 300);
           allResults["nuclei"] = result.output;
           ctx.ui.notify("✅ nuclei complete", "info");
         })(),
 
         // DNS
         (async () => {
-          const result = execCommand(`dig ${target} ANY +short 2>/dev/null; dig ${target} MX +short; dig ${target} NS +short`, 30);
+          const result = await execCommand(`dig ${target} ANY +short 2>/dev/null; dig ${target} MX +short; dig ${target} NS +short`, 30);
           allResults["dns"] = result.output;
           ctx.ui.notify("✅ DNS enumeration complete", "info");
         })(),
@@ -814,7 +807,7 @@ Total findings: ${state.findings.length}
       timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 120)" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const result = execCommand(params.command, params.timeout || 120);
+      const result = await execCommand(params.command, params.timeout || 120);
       
       // Track the command
       state.toolsUsed.push(params.command.split(" ")[0]);
